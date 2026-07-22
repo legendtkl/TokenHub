@@ -76,31 +76,204 @@ if ! "${compose[@]}" config --quiet; then
   exit 1
 fi
 
-compose_environment="$("${compose[@]}" config --environment)" || {
-  error "Docker Compose could not resolve deployment environment variables"
+compose_config_json="$("${compose[@]}" config --format json)" || {
+  error "Docker Compose could not render the deployment configuration"
   exit 1
+}
+
+decode_json_codepoint() {
+  local codepoint="$1"
+  local escaped
+
+  if [ "$codepoint" -eq 0 ]; then
+    json_decode_error="NUL is not valid in an environment variable"
+    return 1
+  elif [ "$codepoint" -le 127 ]; then
+    printf -v escaped '\\%03o' "$codepoint"
+  elif [ "$codepoint" -le 2047 ]; then
+    printf -v escaped '\\%03o\\%03o' \
+      "$((192 | codepoint >> 6))" \
+      "$((128 | codepoint & 63))"
+  elif [ "$codepoint" -le 65535 ]; then
+    printf -v escaped '\\%03o\\%03o\\%03o' \
+      "$((224 | codepoint >> 12))" \
+      "$((128 | codepoint >> 6 & 63))" \
+      "$((128 | codepoint & 63))"
+  elif [ "$codepoint" -le 1114111 ]; then
+    printf -v escaped '\\%03o\\%03o\\%03o\\%03o' \
+      "$((240 | codepoint >> 18))" \
+      "$((128 | codepoint >> 12 & 63))" \
+      "$((128 | codepoint >> 6 & 63))" \
+      "$((128 | codepoint & 63))"
+  else
+    json_decode_error="Unicode code point is out of range"
+    return 1
+  fi
+
+  printf -v decoded_json_character '%b' "$escaped"
+}
+
+decode_json_string() {
+  local LC_ALL=C
+  local input="$1"
+  local index=0
+  local length="${#input}"
+  local character
+  local escape
+  local hex
+  local low_hex
+  local codepoint
+  local low_codepoint
+  decoded_json_value=""
+  json_decode_error=""
+
+  while [ "$index" -lt "$length" ]; do
+    character="${input:$index:1}"
+    if [ "$character" != "\\" ]; then
+      decoded_json_value="${decoded_json_value}${character}"
+      index=$((index + 1))
+      continue
+    fi
+
+    index=$((index + 1))
+    if [ "$index" -ge "$length" ]; then
+      json_decode_error="trailing backslash"
+      return 1
+    fi
+    escape="${input:$index:1}"
+    case "$escape" in
+      '"') decoded_json_value="${decoded_json_value}\"" ;;
+      '\') decoded_json_value="${decoded_json_value}\\" ;;
+      '/') decoded_json_value="${decoded_json_value}/" ;;
+      b) decoded_json_value="${decoded_json_value}"$'\b' ;;
+      f) decoded_json_value="${decoded_json_value}"$'\f' ;;
+      n) decoded_json_value="${decoded_json_value}"$'\n' ;;
+      r) decoded_json_value="${decoded_json_value}"$'\r' ;;
+      t) decoded_json_value="${decoded_json_value}"$'\t' ;;
+      u)
+        if [ $((index + 4)) -ge "$length" ]; then
+          json_decode_error="incomplete Unicode escape"
+          return 1
+        fi
+        hex="${input:$((index + 1)):4}"
+        if [[ ! "$hex" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+          json_decode_error="invalid Unicode escape"
+          return 1
+        fi
+        codepoint=$((16#$hex))
+        index=$((index + 4))
+
+        if [ "$codepoint" -ge 55296 ] && [ "$codepoint" -le 56319 ]; then
+          if [ $((index + 6)) -ge "$length" ] ||
+            [ "${input:$((index + 1)):2}" != '\u' ]; then
+            json_decode_error="high surrogate is not followed by a low surrogate"
+            return 1
+          fi
+          low_hex="${input:$((index + 3)):4}"
+          if [[ ! "$low_hex" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+            json_decode_error="invalid low surrogate"
+            return 1
+          fi
+          low_codepoint=$((16#$low_hex))
+          if [ "$low_codepoint" -lt 56320 ] || [ "$low_codepoint" -gt 57343 ]; then
+            json_decode_error="invalid low surrogate"
+            return 1
+          fi
+          codepoint=$((65536 + (codepoint - 55296) * 1024 + low_codepoint - 56320))
+          index=$((index + 6))
+        elif [ "$codepoint" -ge 56320 ] && [ "$codepoint" -le 57343 ]; then
+          json_decode_error="unexpected low surrogate"
+          return 1
+        fi
+
+        if ! decode_json_codepoint "$codepoint"; then
+          return 1
+        fi
+        decoded_json_value="${decoded_json_value}${decoded_json_character}"
+        ;;
+      *)
+        json_decode_error="invalid escape sequence"
+        return 1
+        ;;
+    esac
+    index=$((index + 1))
+  done
+}
+
+decode_environment_line() {
+  local line="$1"
+  local key="$2"
+  local json_value="${line#*:}"
+  local json_length
+
+  while [ "${json_value# }" != "$json_value" ]; do
+    json_value="${json_value# }"
+  done
+  json_value="${json_value%,}"
+  json_length="${#json_value}"
+  if [ "$json_length" -lt 2 ] ||
+    [ "${json_value:0:1}" != '"' ] ||
+    [ "${json_value:$((json_length - 1)):1}" != '"' ]; then
+    error "Docker Compose rendered an invalid JSON string for $key"
+    return 1
+  fi
+  json_value="${json_value:1:$((json_length - 2))}"
+  if ! decode_json_string "$json_value"; then
+    error "Docker Compose rendered an invalid JSON string for $key: $json_decode_error"
+    return 1
+  fi
 }
 
 tokenhub_environment=""
 admin_token=""
 bootstrap_admin_password=""
 secret_key=""
+tokenhub_environment_found=false
+admin_token_found=false
+bootstrap_admin_password_found=false
+secret_key_found=false
 
 while IFS= read -r line; do
-  case "$line" in
-    TOKENHUB_ENV=*) tokenhub_environment="${line#*=}" ;;
-    TOKENHUB_ADMIN_TOKEN=*) admin_token="${line#*=}" ;;
-    TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD=*) bootstrap_admin_password="${line#*=}" ;;
-    TOKENHUB_SECRET_KEY=*) secret_key="${line#*=}" ;;
+  json_line="$line"
+  while :; do
+    case "$json_line" in
+      ' '*) json_line="${json_line# }" ;;
+      $'\t'*) json_line="${json_line#$'\t'}" ;;
+      *) break ;;
+    esac
+  done
+  case "$json_line" in
+    '"TOKENHUB_ENV":'*)
+      decode_environment_line "$json_line" "TOKENHUB_ENV" || exit 1
+      tokenhub_environment="$decoded_json_value"
+      tokenhub_environment_found=true
+      ;;
+    '"TOKENHUB_ADMIN_TOKEN":'*)
+      decode_environment_line "$json_line" "TOKENHUB_ADMIN_TOKEN" || exit 1
+      admin_token="$decoded_json_value"
+      admin_token_found=true
+      ;;
+    '"TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD":'*)
+      decode_environment_line "$json_line" "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD" || exit 1
+      bootstrap_admin_password="$decoded_json_value"
+      bootstrap_admin_password_found=true
+      ;;
+    '"TOKENHUB_SECRET_KEY":'*)
+      decode_environment_line "$json_line" "TOKENHUB_SECRET_KEY" || exit 1
+      secret_key="$decoded_json_value"
+      secret_key_found=true
+      ;;
   esac
-done <<<"$compose_environment"
-unset compose_environment
+done <<<"$compose_config_json"
+unset compose_config_json decoded_json_value decoded_json_character json_decode_error json_line
 
-# These defaults mirror the ${VAR:-default} expressions in docker-compose.yml.
-tokenhub_environment="${tokenhub_environment:-prod}"
-admin_token="${admin_token:-change-me-tokenhub-admin-token}"
-bootstrap_admin_password="${bootstrap_admin_password:-change-me-tokenhub-admin-password}"
-secret_key="${secret_key:-change-me-tokenhub-secret-key}"
+if [ "$tokenhub_environment_found" = false ] ||
+  [ "$admin_token_found" = false ] ||
+  [ "$bootstrap_admin_password_found" = false ] ||
+  [ "$secret_key_found" = false ]; then
+  error "Docker Compose did not render all required TokenHub credential variables"
+  exit 1
+fi
 
 trim_whitespace() {
   # Keep this list aligned with Go's strings.TrimSpace (Unicode White_Space).

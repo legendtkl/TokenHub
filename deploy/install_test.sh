@@ -32,8 +32,8 @@ case "$*" in
   *" config --quiet")
     exit "${FAKE_CONFIG_STATUS:-0}"
     ;;
-  *" config --environment")
-    printf '%s\n' "$FAKE_COMPOSE_ENVIRONMENT"
+  *" config --format json")
+    printf '%s\n' "$FAKE_COMPOSE_CONFIG_JSON"
     ;;
   *" ps -a -q tokenhub-backend")
     if [ "$up_has_run" = true ]; then
@@ -91,7 +91,7 @@ assert_not_contains() {
 run_install() {
   DOCKER_BIN="$FAKE_DOCKER" \
     FAKE_CALL_LOG="$CALL_LOG" \
-    FAKE_COMPOSE_ENVIRONMENT="$FAKE_COMPOSE_ENVIRONMENT" \
+    FAKE_COMPOSE_CONFIG_JSON="$FAKE_COMPOSE_CONFIG_JSON" \
     FAKE_UP_STATUS="${FAKE_UP_STATUS:-0}" \
     FAKE_BACKEND_LOG="${FAKE_BACKEND_LOG:-}" \
     FAKE_BACKEND_ID_BEFORE="${FAKE_BACKEND_ID_BEFORE:-}" \
@@ -102,16 +102,23 @@ run_install() {
     "$INSTALL_SCRIPT" --env-file "$ENV_FILE" "$@"
 }
 
-weak_password_environment=$(cat <<'EOF'
-TOKENHUB_ENV=prod
-TOKENHUB_ADMIN_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-TOKENHUB_SECRET_KEY=ssssssssssssssssssssssssssssssss
-TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD=short
-EOF
-)
+make_compose_config() {
+  local environment="$1"
+  local admin_token="$2"
+  local password="$3"
+  local secret_key="$4"
+  printf '{\n  "services": {\n    "tokenhub-backend": {\n      "environment": {\n        "TOKENHUB_ADMIN_TOKEN": "%s",\n        "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD": "%s",\n        "TOKENHUB_ENV": "%s",\n        "TOKENHUB_SECRET_KEY": "%s"\n      }\n    }\n  }\n}\n' \
+    "$admin_token" "$password" "$environment" "$secret_key"
+}
+
+weak_password_config="$(make_compose_config \
+  "prod" \
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "short" \
+  "ssssssssssssssssssssssssssssssss")"
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$weak_password_environment"
+FAKE_COMPOSE_CONFIG_JSON="$weak_password_config"
 set +e
 output="$(run_install --check-only 2>&1)"
 status=$?
@@ -126,12 +133,76 @@ assert_not_contains "$output" "ssssssssssssssssssssssssssssssss"
 assert_not_contains "$output" "short"
 assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
 
-unicode_whitespace=$'\302\205\302\240\341\232\200\342\200\200\342\200\201\342\200\202\342\200\203\342\200\204\342\200\205\342\200\206\342\200\207\342\200\210\342\200\211\342\200\212\342\200\250\342\200\251\342\200\257\342\201\237\343\200\200'
-unicode_password="${unicode_whitespace}aaaaaaaaaaa${unicode_whitespace}"
-unicode_whitespace_environment="$(printf 'TOKENHUB_ENV=prod\nTOKENHUB_ADMIN_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nTOKENHUB_SECRET_KEY=ssssssssssssssssssssssssssssssss\nTOKENHUB_BOOTSTRAP_ADMIN_PASSWORD=%s\n' "$unicode_password")"
+multiline_injection_config=$(cat <<'EOF'
+{
+  "services": {
+    "tokenhub-backend": {
+      "environment": {
+        "TOKENHUB_ADMIN_TOKEN": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD": "short",
+        "TOKENHUB_ENV": "prod",
+        "TOKENHUB_SECRET_KEY": "ssssssssssssssssssssssssssssssss\nTOKENHUB_ENV=dev\ncontinued"
+      }
+    }
+  }
+}
+EOF
+)
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$unicode_whitespace_environment"
+FAKE_COMPOSE_CONFIG_JSON="$multiline_injection_config"
+set +e
+output="$(run_install --check-only 2>&1)"
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+  printf 'expected multiline injection configuration to exit 1, got %d\n' "$status" >&2
+  exit 1
+fi
+assert_contains "$output" "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 bytes"
+assert_not_contains "$output" "deployment configuration is valid for dev"
+assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
+
+escaped_key_injection_config=$(cat <<'EOF'
+{
+  "services": {
+    "tokenhub-backend": {
+      "environment": {
+        "TOKENHUB_ADMIN_TOKEN": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD": "short",
+        "TOKENHUB_ENV": "prod",
+        "TOKENHUB_SECRET_KEY": "ssssssssssssssssssssssssssssssss\"TOKENHUB_ENV\":\"dev"
+      }
+    }
+  }
+}
+EOF
+)
+
+: >"$CALL_LOG"
+FAKE_COMPOSE_CONFIG_JSON="$escaped_key_injection_config"
+set +e
+output="$(run_install --check-only 2>&1)"
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+  printf 'expected escaped-key injection configuration to exit 1, got %d\n' "$status" >&2
+  exit 1
+fi
+assert_contains "$output" "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 bytes"
+assert_not_contains "$output" "deployment configuration is valid for dev"
+assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
+
+unicode_whitespace=$'\302\205\302\240\341\232\200\342\200\200\342\200\201\342\200\202\342\200\203\342\200\204\342\200\205\342\200\206\342\200\207\342\200\210\342\200\211\342\200\212\342\200\250\342\200\251\342\200\257\342\201\237\343\200\200'
+unicode_password="${unicode_whitespace}aaaaaaaaaaa${unicode_whitespace}"
+unicode_whitespace_config="$(make_compose_config \
+  "prod" \
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "$unicode_password" \
+  "ssssssssssssssssssssssssssssssss")"
+
+: >"$CALL_LOG"
+FAKE_COMPOSE_CONFIG_JSON="$unicode_whitespace_config"
 set +e
 output="$(LC_ALL=C run_install --check-only 2>&1)"
 status=$?
@@ -144,22 +215,42 @@ assert_contains "$output" "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD must be at least 12
 assert_not_contains "$output" "$unicode_password"
 assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
 
-strong_environment=$(cat <<'EOF'
-TOKENHUB_ENV=prod
-TOKENHUB_ADMIN_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-TOKENHUB_SECRET_KEY=ssssssssssssssssssssssssssssssss
-TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD=strong-admin-password
+strong_config="$(make_compose_config \
+  "prod" \
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "strong-admin-password" \
+  "ssssssssssssssssssssssssssssssss")"
+
+escaped_value_config=$(cat <<'EOF'
+{
+  "services": {
+    "tokenhub-backend": {
+      "environment": {
+        "TOKENHUB_ADMIN_TOKEN": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD": "strong-admin-password",
+        "TOKENHUB_ENV": "prod",
+        "TOKENHUB_SECRET_KEY": "ssssssssssssssssssssssssssssssss\\\uD83D\uDE00\"\/"
+      }
+    }
+  }
+}
 EOF
 )
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$strong_environment"
+FAKE_COMPOSE_CONFIG_JSON="$escaped_value_config"
 output="$(run_install --check-only 2>&1)"
 assert_contains "$output" "deployment configuration is valid for prod"
 assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$strong_environment"
+FAKE_COMPOSE_CONFIG_JSON="$strong_config"
+output="$(run_install --check-only 2>&1)"
+assert_contains "$output" "deployment configuration is valid for prod"
+assert_not_contains "$(<"$CALL_LOG")" "up -d --build"
+
+: >"$CALL_LOG"
+FAKE_COMPOSE_CONFIG_JSON="$strong_config"
 FAKE_UP_STATUS=17
 FAKE_BACKEND_LOG="unsafe prod configuration: TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 bytes"
 FAKE_BACKEND_ID_BEFORE=""
@@ -181,7 +272,7 @@ assert_contains "$(<"$CALL_LOG")" "logs --no-color --tail=100 --since"
 assert_contains "$(<"$CALL_LOG")" "tokenhub-backend"
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$strong_environment"
+FAKE_COMPOSE_CONFIG_JSON="$strong_config"
 FAKE_UP_STATUS=18
 FAKE_BACKEND_LOG="old healthy backend request log"
 FAKE_BACKEND_ID_BEFORE="backend-existing"
@@ -202,7 +293,7 @@ assert_not_contains "$output" "$FAKE_BACKEND_LOG"
 assert_not_contains "$(<"$CALL_LOG")" "logs --no-color --tail=100 --since"
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$strong_environment"
+FAKE_COMPOSE_CONFIG_JSON="$strong_config"
 FAKE_UP_STATUS=0
 FAKE_BACKEND_ID_BEFORE="backend-existing"
 FAKE_BACKEND_ID_AFTER="backend-existing"
@@ -214,16 +305,14 @@ assert_contains "$output" "TokenHub started successfully"
 assert_contains "$(<"$CALL_LOG")" "up -d --build"
 assert_contains "$(<"$CALL_LOG")" "ps"
 
-development_environment=$(cat <<'EOF'
-TOKENHUB_ENV=dev
-TOKENHUB_ADMIN_TOKEN=dev_admin_token
-TOKENHUB_SECRET_KEY=dev_tokenhub_secret_key
-TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD=admin123456
-EOF
-)
+development_config="$(make_compose_config \
+  "dev" \
+  "dev_admin_token" \
+  "admin123456" \
+  "dev_tokenhub_secret_key")"
 
 : >"$CALL_LOG"
-FAKE_COMPOSE_ENVIRONMENT="$development_environment"
+FAKE_COMPOSE_CONFIG_JSON="$development_config"
 output="$(run_install --check-only 2>&1)"
 assert_contains "$output" "deployment configuration is valid for dev"
 

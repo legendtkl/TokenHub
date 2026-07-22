@@ -15,7 +15,7 @@ cp deploy/.env.example deploy/.env
 Edit `deploy/.env` before starting:
 
 - `TOKENHUB_ADMIN_TOKEN`: Admin API bootstrap token. Use a random value of at least 32 bytes.
-- `TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD`: Password used only when creating the initial `admin` user. Use at least 12 bytes.
+- `TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD`: Password used only when creating the initial `admin` user. Use 12–72 bytes.
 - `TOKENHUB_SECRET_KEY`: Backend secret key. Use a random value of at least 32 bytes and keep it stable.
 - `TOKENHUB_PUBLIC_BASE_URL`: Public backend URL shown to users.
 - `NEXT_PUBLIC_API_BASE_URL`: Backend URL used by the browser admin console.
@@ -84,7 +84,7 @@ Initial admin login:
 - Username: `admin`
 - Password: the configured `TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD`
 
-For `prod`, `production`, staging, and other non-development environments, startup rejects placeholder values, admin tokens or secret keys shorter than 32 bytes, and bootstrap passwords shorter than 12 bytes.
+For `prod`, `production`, staging, and other non-development environments, startup rejects placeholder values, admin tokens or secret keys shorter than 32 bytes, and bootstrap passwords shorter than 12 bytes. Creating the initial admin also rejects bootstrap passwords longer than bcrypt's 72-byte limit.
 
 View or follow logs manually:
 
@@ -115,7 +115,7 @@ Only use `down -v` when you intentionally want to delete local data.
 | `TOKENHUB_PUBLIC_BASE_URL` | `http://localhost:8080` | Public backend URL shown to users |
 | `TOKENHUB_TRUSTED_PROXY_CIDRS` | empty | Comma-separated proxy IPs or CIDRs allowed to supply `X-Forwarded-For` |
 | `TOKENHUB_ADMIN_TOKEN` | `change-me-tokenhub-admin-token` | Bootstrap admin token for Admin API access |
-| `TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD` | `change-me-tokenhub-admin-password` | Password for the initial `admin` user; must be changed before production startup |
+| `TOKENHUB_BOOTSTRAP_ADMIN_PASSWORD` | `change-me-tokenhub-admin-password` | Password for the initial `admin` user; use 12–72 bytes and change it before production startup |
 | `TOKENHUB_SECRET_KEY` | `change-me-tokenhub-secret-key` | Backend secret key |
 | `TOKENHUB_DATABASE_URL` | `sqlite:///app/data/tokenhub.db` | SQLite database location inside the container |
 | `TOKENHUB_SQLITE_BACKUP_DIR` | `/app/data/backups` | Backup output directory |
