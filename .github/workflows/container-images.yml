@@ -1,6 +1,9 @@
 name: Container images
 
 on:
+  push:
+    branches:
+      - codex/e2e-container-publish
   release:
     types:
       - published
@@ -54,12 +57,14 @@ jobs:
             if [[ "$RELEASE_PRERELEASE" != "true" && -z "${BASH_REMATCH[4]}" ]]; then
               final_tags+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}" "latest")
             fi
-          else
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             if [[ "$MANUAL_TAG" != "edge" && ! "$MANUAL_TAG" =~ ^manual-[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$ ]]; then
               echo "Manual image tag must be edge or start with manual-" >&2
               exit 1
             fi
             final_tags+=("$MANUAL_TAG")
+          else
+            final_tags+=("manual-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
           fi
 
           echo "staging_tag=$staging_tag" >>"$GITHUB_OUTPUT"
